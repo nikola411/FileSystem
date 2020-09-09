@@ -6,7 +6,9 @@
 File::File()
 {
 }
-
+char File::close() {
+	return myImpl->close();
+}
 
 File::~File()
 {

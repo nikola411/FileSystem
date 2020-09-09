@@ -28,6 +28,7 @@ public:
 	char seek(BytesCnt);
 	BytesCnt filePos();
 
+
 	char eof();
 	BytesCnt getFileSize();
 
@@ -56,9 +57,11 @@ private:
 	std::string file_name;
 
 	std::thread::id parent_thread_id;
+
 	KernelFile(FCB*, KernelFS*, std::string); //objekat fajla se može kreirati samo otvaranjem
-	int allocate_clusters(long cluster_to_allocate);
-	int write_in_file(BytesCnt, char*);
+	int allocate_clusters(ClusterNo);
+	int write_in_file1(BytesCnt, char*);
+	
 	char *file_name_converting();
 
 	HANDLE mutex = CreateMutex(NULL, false, NULL);

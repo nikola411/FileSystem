@@ -9,7 +9,7 @@
 #include <iostream>
 #include "stdio.h"
 
-std::unordered_map<std::string, Lock> KernelFS::open_files_map = {};
+std::unordered_map<std::string, Lock*> KernelFS::open_files_map = {};
 std::unordered_map<std::string, File*> KernelFS::file_handle_map = {};
 
 KernelFS::KernelFS() {
@@ -18,7 +18,7 @@ KernelFS::KernelFS() {
 	bit_vector_size = 0;
 	bit_vector_cluster_count = 0;
 	root_index[512] = { 0 };
-	last_cluster[512] = { 0 };
+	last_cluster[ClusterSize] = { 0 };
 	last_cluster_no = 0;
 	files_on_disk = 0;
 	first_free = 0;
@@ -31,6 +31,8 @@ KernelFS::KernelFS() {
 	mount_sem = CreateSemaphore(NULL, 1,32, NULL);
 	format_sem = CreateSemaphore(NULL, 1,32, NULL);
 	unmount_sem = CreateSemaphore(NULL, 0, 1, NULL);
+	rw_mutex = CreateSemaphore(NULL, 1, 1, NULL);
+	alloc_mutex = CreateSemaphore(NULL, 1, 1, NULL);
 
 }
 
@@ -40,7 +42,7 @@ KernelFS::~KernelFS() {
 	bit_vector_size = 0;
 	bit_vector_cluster_count = 0;
 	root_index[512] = { 0 };
-	last_cluster[512] = { 0 };
+	last_cluster[ClusterSize] = { 0 };
 	last_cluster_no = 0;
 	files_on_disk = 0;
 	first_free = 0;
@@ -73,7 +75,7 @@ char KernelFS::mount(Partition * partition)
 	bit_vector = new char[bit_vector_size];
 	
 	bit_vector_cluster_count = bit_vector_size / ClusterSize + (bit_vector_size % ClusterSize != 0 ? 1 : 0);
-	std::cout << "BIT VECTOR CLUSTER COUNT : " << bit_vector_cluster_count<<"\n";
+	std::cout << "BIT VECTOR CLUSTER COUNT : " << bit_vector_cluster_count<<std::endl;
 
 	for (int i = 0; i < bit_vector_cluster_count; i++) {
 		char buffer[ClusterSize] = { 0 };
@@ -268,29 +270,26 @@ File * KernelFS::open(char * fname, char mode)
 	auto search = KernelFS::open_files_map.find(key);
 	if (search != open_files_map.end()) {
 		
-		if (mode == 'r' && search->second.cnt) {
+		if (mode == 'r' && search->second->cnt) {
+			search->second->cnt++;
 			ReleaseSemaphore(mutex, 1, NULL);
-			search->second.lock->acquireRWLockShared();
+			search->second->lock->acquireRWLockShared();
 			WaitForSingleObject(mutex, INFINITE);
-			File *ret = file_handle_map[key];
-			ReleaseSemaphore(mutex, 1, NULL);
-			return ret;
-			
+
+		
 		}
-		else if ((mode == 'w' || mode == 'a') && search->second.cnt){
+		else if ((mode == 'w' || mode == 'a') && search->second->cnt){
+			search->second->cnt++;
 			ReleaseSemaphore(mutex, 1, NULL);
-			search->second.lock->releaseRWLockExclusive();
+			search->second->lock->acquireRWLockExclusive();
 			WaitForSingleObject(mutex, INFINITE);
-			File *ret = file_handle_map[key];
-			ReleaseSemaphore(mutex, 1, NULL);
-			return ret;
-			
+		
 		}
 		else {
-			
-			
-			
+			ReleaseSemaphore(mutex, 1, NULL);
+			return nullptr;
 		}
+		
 	}
 
 	
@@ -359,46 +358,76 @@ char KernelFS::deleteFile(char * fname)
 	return ret;
 }
 
-int KernelFS::readClusterFromPart(ClusterNo to_read, unsigned long *buffer)
+int KernelFS::readClusterFromPart(ClusterNo to_read, char* buffer)
 {
-	WaitForSingleObject(mutex, INFINITE);
+	/*WaitForSingleObject(rw_mutex, INFINITE);
 	if (to_read != last_cluster_no) {
 
 		int ret;
-		ret = my_partition->writeCluster(last_cluster_no, (char*)last_cluster);
-		if (ret == 0) {
-			ReleaseSemaphore(mutex, 1, NULL);
-			return 0;
+		/*if (last_cluster_no != 0) {
+			ret = my_partition->writeCluster(last_cluster_no, (char*)last_cluster);
+			if (ret == 0) {
+				ReleaseSemaphore(rw_mutex, 1, NULL);
+				return 0;
+			}
 		}
+		
 		ret = my_partition->readCluster(to_read, (char*)last_cluster);
 		if (ret == 0) {
-			ReleaseSemaphore(mutex, 1, NULL);
+			ReleaseSemaphore(rw_mutex, 1, NULL);
 			return 0;
 		}
 		last_cluster_no = to_read;
-		std::memcpy(buffer, last_cluster, ClusterSize / 4 * sizeof(unsigned long));
+		std::memcpy(buffer, (char*)last_cluster, ClusterSize * sizeof(char));
 	}
 	else {
-		std::memcpy(buffer, last_cluster, ClusterSize/4 * sizeof(unsigned long));
+		std::memcpy(buffer, last_cluster, ClusterSize * sizeof(char));
 	}
-	ReleaseSemaphore(mutex, 1, NULL);
+	ReleaseSemaphore(rw_mutex, 1, NULL);*/
+	int ret = my_partition->readCluster(to_read, (char*)buffer);
+	if (ret == 0) {
+		//ReleaseSemaphore(rw_mutex, 1, NULL);
+		return 0;
+	}
 
 	return 1;
 	
 }
 
-int KernelFS::writeClusterToPart(ClusterNo to_write, unsigned long *cluster)
+int KernelFS::writeClusterToPart(ClusterNo to_write, char* cluster)
 {
-	WaitForSingleObject(mutex, INFINITE);
-	int ret = my_partition->writeCluster(to_write, (char*)cluster);
-	if (ret == 0) {
-		ReleaseSemaphore(mutex, 1, NULL);
-		return 0;
+	/*WaitForSingleObject(rw_mutex, INFINITE); 
+	/*if (to_write == last_cluster_no) {
+		//fresh data
+		std::memcpy(last_cluster, cluster, ClusterSize * sizeof(char));
+	}
+	else {
+		if (last_cluster_no != 0) {
+			int ret = my_partition->writeCluster(last_cluster_no, (char*)last_cluster);
+			if (ret == 0) {
+				ReleaseSemaphore(rw_mutex, 1, NULL);
+				return 0;
+			}
+		}
+		
+		std::memcpy((char*)last_cluster, cluster, ClusterSize * sizeof(char));
+		last_cluster_no = to_write;
 	}
 	if (to_write == last_cluster_no) {
-		std::memcpy(last_cluster, cluster, ClusterSize / 4 * sizeof(unsigned long));
+		std::memcpy((char*)last_cluster, cluster, ClusterSize * sizeof(char));
 	}
-	ReleaseSemaphore(mutex, 1, NULL);
+	int ret = my_partition->writeCluster(to_write, (char*)cluster);
+	if (ret == 0) {
+		ReleaseSemaphore(rw_mutex, 1, NULL);
+		return 0;
+	}
+
+	ReleaseSemaphore(rw_mutex, 1, NULL);*/
+	int ret = my_partition->writeCluster(to_write, (char*)cluster);
+	if (ret == 0) {
+		//ReleaseSemaphore(rw_mutex, 1, NULL);
+		return 0;
+	}
 	return 1;
 }
 
@@ -422,14 +451,17 @@ int * KernelFS::fileLocation(char * fname)
 		coord[j] = 0;
 	}
 	FCB zero_fcb;
-	
+	unsigned int index_2[512] = { 0 };
+	FCB file_table[ClusterSize / 32] = { zero_fcb };
+
 	for (int i = 0; i < 512; i++) {
 		
 		to_read = root_index[i];
-		unsigned int index_2[512] = { 0 };
+		if (to_read == 0) continue;
+		
 		//readClusterFromPart
 		
-		ret = my_partition->readCluster(to_read, (char*)index_2);
+		ret = readClusterFromPart(to_read, (char*)index_2);
 		
 
 		if (ret == 0) {
@@ -438,10 +470,9 @@ int * KernelFS::fileLocation(char * fname)
 		for (int j = 0; j < 512; j++) {
 				
 			to_read = index_2[j];
-			FCB file_table[ClusterSize / 32] = { zero_fcb };
-			//readClusterFromPart
+			if (to_read == 0) continue;
 			
-			ret = my_partition->readCluster(to_read, (char*)file_table);
+			ret = readClusterFromPart(to_read, (char*)file_table);
 			
 			if (ret == 0) {
 				continue;
@@ -531,16 +562,17 @@ File * KernelFS::openR(char *fname, int *coord)
 	//we dont return anything on disc because we only read
 	std::string key(fname);
 	Lock zero_lock;
-	if (std::memcmp(&KernelFS::open_files_map[key], &zero_lock, sizeof(Lock))) {
+	if (KernelFS::open_files_map.find(key)==KernelFS::open_files_map.end()) {
 		Lock *my_lock = new Lock;
 		RWLockHandle *lock = new RWLockHandle();
 		my_lock->cnt = 1;
 		my_lock->lock = lock;
-		
-		KernelFS::open_files_map.insert({ key, *my_lock });
+		my_lock->lock->acquireRWLockShared();
+		KernelFS::open_files_map[key] = my_lock;
 	}
 	else {
-		KernelFS::open_files_map[key].cnt++;
+		KernelFS::open_files_map[key]->lock->acquireRWLockShared();
+		//KernelFS::open_files_map[key]->cnt++;
 	}
 	
 	
@@ -668,9 +700,10 @@ File * KernelFS::openW(char *fname)
 		return nullptr;
 	}
 	new_file->index0 = data_cluster;
-	new_file->empty[0] = 'w';
+	
+	//std::memcpy ovde mora
 	file_table[i] = *new_file;
-
+	new_file->empty[0] = 'w';
 
 	ret = my_partition->writeCluster(index_2[root_index_2_entry], (char*)file_table);
 	if (ret == 0) {
@@ -680,18 +713,19 @@ File * KernelFS::openW(char *fname)
 	std::string key(fname);
 
 	Lock zero_lock;
-	KernelFS::open_files_map[key].lock = nullptr;
-	if (!KernelFS::open_files_map[key].lock) {
+	
+	if (KernelFS::open_files_map.find(key) == KernelFS::open_files_map.end()) {
 		Lock *my_lock = new Lock;
 		my_lock->lock = new RWLockHandle();
 		my_lock->lock->acquireRWLockExclusive();
 		my_lock->cnt = 1;
-		KernelFS::open_files_map.insert({ key, *my_lock});
+		KernelFS::open_files_map[key] = my_lock;
+		
 		
 	}
 	else {
-		KernelFS::open_files_map[key].lock->acquireRWLockExclusive();
-		KernelFS::open_files_map[key].cnt++;
+		KernelFS::open_files_map[key]->lock->acquireRWLockExclusive();
+		KernelFS::open_files_map[key]->cnt++;
 		
 	}
 	
@@ -728,25 +762,32 @@ File * KernelFS::openA(char *fname, int *coord)
 		ReleaseSemaphore(mutex, 1, NULL);;
 		return nullptr;
 	}
+
 	FCB *new_file = new FCB;
 	std::memcpy(new_file, &file_table[file_table_entry], sizeof(FCB));
+
 	new_file->empty[0] = 'a';
 	//we dont return anything on disc because we only read 
 	std::string key(fname);
 
 	Lock zero_lock;
-	if (std::memcmp(&KernelFS::open_files_map[key], &zero_lock,sizeof(Lock))) {
+	if (KernelFS::open_files_map.find(key) == KernelFS::open_files_map.end()) {
 		Lock *my_lock = new Lock;
 		RWLockHandle *lock = new RWLockHandle();
 		my_lock->lock = lock;
 		my_lock->cnt = 1;
 		
-		KernelFS::open_files_map.insert({ key, *my_lock });
+		
+		KernelFS::open_files_map[key] = my_lock;
 		my_lock->lock->acquireRWLockExclusive();
-	}
+	} 
 	std::string file_name(fname);
 
 	KernelFile *file_ker = new KernelFile(new_file, this, file_name);
+	file_ker->cursor = new_file->fileSize;
+	file_ker->allocated_size = (new_file->fileSize / ClusterSize + (new_file->fileSize % ClusterSize != 0 ? 1 : 0))*ClusterSize;
+	file_ker->index_2_entry = (file_ker->cursor / ClusterSize) % 512;
+	file_ker->index_1_entry = (file_ker->cursor / ClusterSize ) / 512;
 	File *file_ret = new File();
 	file_ret->myImpl = file_ker;
 	KernelFS::file_handle_map[key] = file_ret;
@@ -761,9 +802,9 @@ File * KernelFS::openA(char *fname, int *coord)
 ClusterNo KernelFS::allocateCluster()
 {
 	//no free clusters
-	
+	WaitForSingleObject(alloc_mutex, INFINITE);
 	if (first_free == -1) {
-		
+		ReleaseSemaphore(alloc_mutex, 1, NULL);
 		return -1;
 	}
 	//allocate cluster
@@ -771,7 +812,7 @@ ClusterNo KernelFS::allocateCluster()
 	//i ovde moze da se koristi writeClusterToPart
 	ClusterNo ret = my_partition->writeCluster(first_free, (char*)buffer);
 	if (ret == 0) {
-		
+		ReleaseSemaphore(alloc_mutex, 1, NULL);
 		return -1;
 	}
 	int pos_1 = first_free / 8;
@@ -779,6 +820,8 @@ ClusterNo KernelFS::allocateCluster()
 
 	bit_vector[pos_1] = bit_vector[pos_1] | (256>>pos_2);
 	ret = first_free++;
+	//std::cout << "ALOCIRAM KLASTER BR: " << ret << " ZA NIT "<< (int)GetCurrentThreadId()<< std::endl;
+
 	//update first_free 
 	while (checkCluster(first_free)) {
 		first_free++;
@@ -789,7 +832,7 @@ ClusterNo KernelFS::allocateCluster()
 			first_free = -1;
 		}
 	}
-	
+	ReleaseSemaphore(alloc_mutex, 1, NULL);
 	return ret;
 }
 
@@ -803,7 +846,7 @@ void KernelFS::deallocateCluster(ClusterNo to_deallocate)
 	if (to_deallocate < first_free) {
 		first_free = to_deallocate;
 	}
-	ReleaseSemaphore(mutex, 1, NULL);;
+	ReleaseSemaphore(mutex, 1, NULL);
 
 }
 
@@ -846,9 +889,7 @@ char ** KernelFS::split(char *fname)
 	for (int j = i; j < 8; j++) {
 		name[j] = ' ';
 	}
-	for (int k = 0; k < 8; k++) {
-		std::cout << name[k];
-	}
+
 	
 	std::memcpy(ext, fname + i + 1, 3);
 
@@ -858,6 +899,34 @@ char ** KernelFS::split(char *fname)
 	
 	
 	return ret;
+}
+
+int KernelFS::update_fcb(char * file_name, FCB* fcb)
+{
+	int* ret = KernelFile::my_fs->fileLocation(file_name);
+	unsigned long index2[512] = { 0 };
+	int c = readClusterFromPart(root_index[ret[0]], (char*)index2);
+	if (c == 0) {
+		return 0;
+	}
+	FCB zero_fcb;
+	FCB fcb_cluster[ClusterSize / 32] = { zero_fcb };
+	c = my_partition->readCluster(index2[ret[1]], (char*)fcb_cluster);
+	if (c == 0) {
+		return 0;
+	}
+	
+
+	fcb_cluster[ret[2]].fileSize = fcb->fileSize;
+
+	fcb_cluster[ret[2]].empty[0] = '\0';
+	
+	c = my_partition->writeCluster(index2[ret[1]], (char*)fcb_cluster);
+	if (c == 0) {
+		return 0;
+	}
+	
+	return 1;
 }
 
 

@@ -21,7 +21,8 @@ struct FCB {
 	char notUsed = 0;
 	ClusterNo index0 = 0;
 	unsigned int fileSize = 0;
-	char empty[12] = { 0 };
+	char empty[8] = { 0 };
+	unsigned long goodSize = 0;
 };
 
 struct Lock {
@@ -54,8 +55,8 @@ public:
 private:
 	friend class KernelFile;
 
-	int readClusterFromPart(ClusterNo, unsigned long *);
-	int writeClusterToPart(ClusterNo, unsigned long *);
+	int readClusterFromPart(ClusterNo, char*);
+	int writeClusterToPart(ClusterNo,char*);
 	
 	Partition *my_partition;
 	char *bit_vector;
@@ -64,7 +65,7 @@ private:
 
 	unsigned long root_index[512];
 
-	unsigned long last_cluster[512];
+	char last_cluster[ClusterSize];
 	ClusterNo last_cluster_no;
 	long files_on_disk;
 
@@ -73,13 +74,14 @@ private:
 	ClusterNo root_index_2_entry;
 	ClusterNo file_table_entry;
 
-	static std::unordered_map<std::string, Lock> open_files_map;
+	static std::unordered_map<std::string, Lock*> open_files_map;
 	static std::unordered_map<std::string, File*> file_handle_map;
 
 	int * fileLocation(char* fname);
 	//delete file takes file coordinates as argument
 	int deleteFile(int*);
 	static char ** split(char*);
+	int update_fcb(char* file_name, FCB* fcb);
 
 	File * openR(char*, int*);
 	File * openW(char*);
@@ -98,6 +100,8 @@ private:
 	HANDLE mount_sem ;//we wait on this mutex we there are open files
 	HANDLE format_sem;//waitin when open files cnt  > 0
 	HANDLE unmount_sem;
+	HANDLE rw_mutex;
+	HANDLE alloc_mutex;
 	
 
 

@@ -15,6 +15,7 @@ public:
 	char eof();
 	BytesCnt getFileSize();
 	char truncate();
+	char close();
 
 private:
 
