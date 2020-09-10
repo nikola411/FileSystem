@@ -21,8 +21,7 @@ struct FCB {
 	char notUsed = 0;
 	ClusterNo index0 = 0;
 	unsigned int fileSize = 0;
-	char empty[8] = { 0 };
-	unsigned long goodSize = 0;
+	char empty[12] = { 0 };
 };
 
 struct Lock {
@@ -65,18 +64,14 @@ private:
 
 	unsigned long root_index[512];
 
-	char last_cluster[ClusterSize];
-	ClusterNo last_cluster_no;
-	long files_on_disk;
-
 	ClusterNo first_free;
 	ClusterNo root_index_entry;
 	ClusterNo root_index_2_entry;
+
 	ClusterNo file_table_entry;
 
 	static std::unordered_map<std::string, Lock*> open_files_map;
-	static std::unordered_map<std::string, File*> file_handle_map;
-
+	
 	int * fileLocation(char* fname);
 	//delete file takes file coordinates as argument
 	int deleteFile(int*);
@@ -103,8 +98,6 @@ private:
 	HANDLE rw_mutex;
 	HANDLE alloc_mutex;
 	
-
-
 };
 
 

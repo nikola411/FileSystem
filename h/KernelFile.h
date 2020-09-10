@@ -7,12 +7,10 @@
 
 class KernelFS;
 struct FCB;
-const long maxFileSize= 512 * 512 * 2048;
+const long MAX_FILE_SIZE= 512 * 512 * 2048;
 
 
 typedef unsigned long ClusterNo;
-
-
 
 class KernelFile
 {
@@ -42,8 +40,12 @@ private:
 	unsigned long cursor;//current position in file given as abosulte postition counted in bytes
 	unsigned long end_of_file;//end of file given as absolute position of end counted in bytes
 
-	unsigned long last_cluster[512];
+	char last_cluster[2048];
 	ClusterNo last_cluster_no;
+
+	unsigned long last_index2[512];
+	ClusterNo last_index2_no;
+	bool dirty_index2;
 
 	unsigned long index_1[512];
 	ClusterNo index_1_no;
@@ -53,7 +55,7 @@ private:
 	unsigned long index_1_entry;
 	unsigned long index_2_entry;
 
-	static KernelFS *my_fs;
+	KernelFS *my_fs;
 	std::string file_name;
 
 	std::thread::id parent_thread_id;
@@ -67,6 +69,10 @@ private:
 	HANDLE mutex = CreateMutex(NULL, false, NULL);
 	int write_cnt;//actually bool 
 	int read_cnt;
+
+	int readCluster(ClusterNo, char*);
+	int writeCluster(ClusterNo, char*);
+	bool dirty;
 	
 };
 #endif

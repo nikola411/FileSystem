@@ -11,19 +11,23 @@ const int ALLOCATION_ERR = 0;
 const int NO_OPEN_FILE_ERR = 0;
 const int CLUSTER_WRITE_ERR = 0;
 
-KernelFS * KernelFile::my_fs = nullptr;
+
 
 KernelFile::KernelFile(FCB *my_fcb, KernelFS *myFS, std::string fname) {
 	if (my_fcb != nullptr) {
 		this->my_fcb = my_fcb;
 		cursor = 0;
 		parent_thread_id = std::this_thread::get_id();
-		last_cluster[512] = { 0 };
+		last_cluster[2048] = { 0 };
 		index_1[512] = { 0 };
+		last_index2[512] = { 0 };
+		last_index2_no = 0;
 		
 		last_cluster_no = 0;
+		dirty = false;
 		index_1_entry = 0;
 		index_2_entry = 0;
+		dirty_index2 = false;
 		
 
 		end_of_file = my_fcb->fileSize;
@@ -36,7 +40,7 @@ KernelFile::KernelFile(FCB *my_fcb, KernelFS *myFS, std::string fname) {
 
 		read_cnt = 0;
 		write_cnt = 0;
-		KernelFile::my_fs = myFS;
+		my_fs = myFS;
 
 	}
 
@@ -60,7 +64,7 @@ int KernelFile::allocate_clusters(ClusterNo clusters_to_allocate)
 	//if current entry is not allocated, allocate it
 	if (index_1[index_1_entry] == 0) {
 		//allocate idnex_2
-		index_1[index_1_entry] = KernelFile::my_fs->allocateCluster();
+		index_1[index_1_entry] = my_fs->allocateCluster();
 		index_2_entry = 0;
 		changed = 1;
 	}
@@ -68,7 +72,7 @@ int KernelFile::allocate_clusters(ClusterNo clusters_to_allocate)
 	//allocate index_1 entries ; index_2 clusters
 	if (index_1_clusters) {
 		for (int i = 1; i < index_1_clusters; i++) {
-			index_1[index_1_entry + i] = KernelFile::my_fs->allocateCluster();
+			index_1[index_1_entry + i] = my_fs->allocateCluster();
 			changed = 2;
 		}
 	}
@@ -77,6 +81,8 @@ int KernelFile::allocate_clusters(ClusterNo clusters_to_allocate)
 	int index_1_entry_counter = 0;
 	unsigned long index_2[512] = { 0 };
 	int i = 0;
+
+	int first = 1;
 	//data clusters to allocate
 	while (index_2_clusters) {
 		int ret = KernelFile::my_fs->readClusterFromPart(index_1[index_1_entry + i], (char*)index_2);
@@ -92,10 +98,10 @@ int KernelFile::allocate_clusters(ClusterNo clusters_to_allocate)
 		}
 
 		ret = KernelFile::my_fs->writeClusterToPart(index_1[index_1_entry + i], (char*)index_2);
+	
 		if (ret == 0) {
 			return CLUSTER_WRITE_ERR;
 		}
-
 
 		if (index_2_clusters) {
 			index_2_entry = 0;
@@ -105,14 +111,13 @@ int KernelFile::allocate_clusters(ClusterNo clusters_to_allocate)
 	}
 
 	index_2_entry = cnt;
-	//end_of_file += clusters_to_allocate * ClusterSize;
+	dirty_index2 = true;
 	allocated_size += clusters_to_allocate * ClusterSize;
 
 	return 1;
-	
-	
+		
 }
-//writing when eof!=cursor
+
 int KernelFile::write_in_file1(BytesCnt size, char *buffer)
 {
 	unsigned long index_2[512] = { 0 };
@@ -126,18 +131,36 @@ int KernelFile::write_in_file1(BytesCnt size, char *buffer)
 	long j = 0;
 
 	char data[ClusterSize] = { 0 };
+	//check if index2 is valid
+	if (last_index2_no == 0 || dirty_index2) {
+		ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
+		if (ret == 0) {
 
-	ret = KernelFile::my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
-	if (ret == 0) {
+			std::cout << "ERROR READING INDEX2 CLUSTER  NO: " << index_1[index_1_entry] << std::endl;
+			return CLUSTER_READING_ERR;
+		}
+		last_index2_no = index_1[index_1_entry];
+		std::memcpy(last_index2, index_2, 512 * sizeof(unsigned long));
+		dirty_index2 = false;
 
-		std::cout << "ERROR READING INDEX2 CLUSTER  NO: " << index_1[index_1_entry] << std::endl;
-		return CLUSTER_READING_ERR;
+	}
+	else if (last_index2_no != index_1[index_1_entry] ) {
+		ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)last_index2);
+		if (ret == 0) {
+
+			std::cout << "ERROR READING INDEX2 CLUSTER  NO: " << index_1[index_1_entry] << std::endl;
+			return CLUSTER_READING_ERR;
+		}
+		last_index2_no = index_1[index_1_entry];
+		std::memcpy(index_2, last_index2, 512 * sizeof(unsigned long));
+	}
+	else {
+		std::memcpy((char*)index_2, (char*)last_index2, ClusterSize * sizeof(char));
 	}
 
 	while (temp) {
 
-
-		ret = KernelFile::my_fs->readClusterFromPart(index_2[index_2_entry], data);
+ 		ret = readCluster(index_2[index_2_entry], data);
 		if (ret == 0) {
 
 			std::cout << "ERROR READING DATA CLUSTER NO: " << index_2[index_2_entry] << std::endl;
@@ -145,41 +168,44 @@ int KernelFile::write_in_file1(BytesCnt size, char *buffer)
 
 			return CLUSTER_READING_ERR;
 		}
-		//to_write_in_cluster_cnt shows higher bound of our for loop,
-
+		
 		long to_write_in_cluster_cnt = temp + data_cluster_entry > ClusterSize ? ClusterSize : temp + data_cluster_entry;
 
 		for (long i = data_cluster_entry; i < to_write_in_cluster_cnt; i++) {
 			data[i] = to_write[j++];
 		}
-		KernelFile::my_fs->writeClusterToPart(index_2[index_2_entry], data);
+		ret = writeCluster(index_2[index_2_entry], data);
+		if (ret == 0) {
+			return CLUSTER_WRITE_ERR;
+		}
 		temp -= (to_write_in_cluster_cnt - data_cluster_entry);
-		//ovaj uslov ne valja!!
-		if (to_write_in_cluster_cnt == ClusterSize) {
+		
+		if (to_write_in_cluster_cnt == ClusterSize ) {
 			data_cluster_entry = 0;
 			index_2_entry++;
 			if (index_2_entry == 512) {
 				index_2_entry = 0;
 				index_1_entry++;
-				int ret = KernelFile::my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
-				if (ret == 0) {
-					return 0;
+				if (index_1[index_1_entry]) {
+					int ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
+					if (ret == 0) {
+						return 0;
+					}
+					last_index2_no = index_1[index_1_entry];
+					std::memcpy(last_index2, index_2, 512 * sizeof(unsigned long));
+
+				}
+				else {
+					dirty_index2 = true;
 				}
 				
 			}
-
 		}
-		
-
 	}
 	cursor += size;
 	end_of_file = end_of_file > cursor ? end_of_file : cursor;
 	return 1;
-	
 
-
-
-	
 }
 
 char * KernelFile::file_name_converting()
@@ -207,6 +233,70 @@ char * KernelFile::file_name_converting()
 	return file_name;
 }
 
+int KernelFile::readCluster(ClusterNo to_read, char *buffer)
+{
+	int ret = 1;
+	if (last_cluster_no == 0) {
+		ret = my_fs->readClusterFromPart(to_read, last_cluster);
+		if (ret == 0) {
+			return 0;
+		}
+		last_cluster_no = to_read;
+		std::memcpy(buffer, last_cluster, ClusterSize * sizeof(char));
+		return 1;
+	}else
+	if (last_cluster_no != to_read ) {
+		if (dirty) {
+			ret = my_fs->writeClusterToPart(last_cluster_no, last_cluster);
+			if (ret == 0) {
+				return 0;
+			}
+			dirty = false;
+		}
+		
+		ret = my_fs->readClusterFromPart(to_read, last_cluster);
+		if (ret == 0) {
+			return 0;
+		}
+		last_cluster_no = to_read;
+		std::memcpy(buffer, last_cluster, ClusterSize * sizeof(char));
+
+		return 1;
+	}else
+	if (last_cluster_no == to_read) {
+		std::memcpy(buffer, last_cluster, ClusterSize * sizeof(char));
+		return 1;
+	} 
+	else {
+		return 0;
+	}
+	
+}
+
+int KernelFile::writeCluster(ClusterNo to_write, char *buffer)
+{
+	int ret;
+	if (last_cluster_no == to_write) {
+		std::memcpy(last_cluster, buffer, ClusterSize * sizeof(char));
+		dirty = true;
+		return 1;
+	}
+	else {
+		if (dirty) {
+			ret = my_fs->writeClusterToPart(last_cluster_no, last_cluster);
+			if (ret == 0) {
+				return 0;
+			}
+			
+		}
+		std::memcpy(last_cluster, buffer, ClusterSize * sizeof(char));
+		last_cluster_no = to_write;
+		dirty = true;
+		return 1;
+	}
+	
+}
+
 KernelFile::~KernelFile()
 {
 	this->close();
@@ -214,11 +304,11 @@ KernelFile::~KernelFile()
 
 char KernelFile::close()
 {
-	WaitForSingleObject(KernelFile::my_fs->mutex, INFINITE);
+	WaitForSingleObject(my_fs->mutex, INFINITE);
 	auto search = KernelFS::open_files_map.find(file_name);
 
 	if (search == KernelFS::open_files_map.end()) {
-		ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
+		ReleaseSemaphore(my_fs->mutex, 1, NULL);
 		return 0;
 	}
 	
@@ -226,11 +316,17 @@ char KernelFile::close()
 	char* name = new char[name_length + 1];
 
 	std::strcpy(name, file_name.c_str());
-	
 	my_fcb->fileSize = this->end_of_file;
 
-	int ret = KernelFile::my_fs->update_fcb(name, my_fcb);
-	ret = KernelFile::my_fs->writeClusterToPart(index_1_no, (char*)index_1);
+	int ret = my_fs->update_fcb(name, my_fcb);
+	ret = my_fs->writeClusterToPart(index_1_no, (char*)index_1);
+	if (dirty) {
+		ret = my_fs->writeClusterToPart(last_cluster_no, (char*)last_cluster);
+	}
+	if (dirty_index2) {
+		ret = my_fs->writeClusterToPart(last_index2_no, (char*)last_index2);
+	}
+	
 	search->second->cnt--;
 
 	if (search->second->cnt) {
@@ -243,12 +339,18 @@ char KernelFile::close()
 	}
 	else {
 		KernelFS::open_files_map.erase(file_name);
+		if (KernelFS::open_files_map.size() == 0) {
+			if (my_fs->formatting) {
+				ReleaseSemaphore(my_fs->format_sem, 1, NULL);
+			}
+			if (my_fs->unmounting) {
+				ReleaseSemaphore(my_fs->unmount_sem, 1, NULL);
+			}
+		}
 	}
-
 	delete name;
-	
-	ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
-	
+	ReleaseSemaphore(my_fs->mutex, 1, NULL);
+
 	if (ret == 0) {
 		return 0;
 	}
@@ -259,127 +361,132 @@ char KernelFile::close()
 
 char KernelFile::write(BytesCnt to_write, char * buffer)
 {
-	//syncrhonize
-	//we cant allow 
-
-	if (parent_thread_id != std::this_thread::get_id()) {
-		//signal sem
+	//file is open and i cannot write
+	if (my_fcb->empty[0] == 'r') {
 		return 0;
 	}
-
-	WaitForSingleObject(KernelFile::my_fs->mutex, INFINITE);
-	auto search = KernelFile::my_fs->open_files_map.find(this->file_name);
-	
-
-	if (search != KernelFile::my_fs->open_files_map.end()) {
-		ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
-		//file is open and i cannot write
-		if (my_fcb->empty[0] == 'r') {
-			return 0;
-		}
-		else {
-			//file is opened for writing and we can write in it
-		
-			if (cursor + to_write > allocated_size) {
+	else if (cursor + to_write > MAX_FILE_SIZE) {
+		return 0;
+	}	
+	else {
+		//file is opened for writing and we can write in it
+		if (cursor + to_write > allocated_size) {
 				
-				long to_allocate = cursor + to_write - allocated_size;//in bytes
-				long clusters_to_allocate = to_allocate / ClusterSize + (to_allocate%ClusterSize != 0 ? 1 : 0);
-				int ret = allocate_clusters(clusters_to_allocate);
-				if (ret == 0) {
+			long to_allocate = cursor + to_write - allocated_size;//in bytes
+			long clusters_to_allocate = to_allocate / ClusterSize + (to_allocate%ClusterSize != 0 ? 1 : 0);
+			int ret = allocate_clusters(clusters_to_allocate);
+			if (ret == 0) {
 					
-					return ALLOCATION_ERR;
-				}
-				
+				return ALLOCATION_ERR;
 			}
-			
-			int ret = write_in_file1(to_write, buffer);
-			
-			//finish sync??
-
-			return ret;
+				
 		}
-	} else {
-		ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
-		return NO_OPEN_FILE_ERR;
-	}
-
-	
+			
+		int ret = write_in_file1(to_write, buffer);
+		return ret;
+	}	
 }
 
 BytesCnt KernelFile::read(BytesCnt to_read, char* buffer)
 {
 
-	WaitForSingleObject(KernelFile::my_fs->mutex, INFINITE);
-	if (KernelFile::my_fs->open_files_map.find(this->file_name) == KernelFile::my_fs->open_files_map.end()) {
-		ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
+	WaitForSingleObject(my_fs->mutex, INFINITE);
+	if (my_fs->open_files_map.find(this->file_name) == my_fs->open_files_map.end()) {
+		ReleaseSemaphore(my_fs->mutex, 1, NULL);
 		return 0;
 
 	}
-	ReleaseSemaphore(KernelFile::my_fs->mutex, 1, NULL);
+	ReleaseSemaphore(my_fs->mutex, 1, NULL);
 	if (cursor == end_of_file) {
 		return 0;
 	}
 
 	long to_read_in_file = (end_of_file - cursor > to_read ? to_read : end_of_file - cursor);
-	long cursor_cluster = cursor / ClusterSize;
-	//long index_2_entr_no = cursor_cluster / (ClusterSize / 4) + (cursor_cluster % (ClusterSize / 4) != 0 ? 1 : 0);
-	long index_2_entr_no = cursor / ClusterSize ;
-	long entry_2 = index_2_entr_no % 512;
-	long entry_1 = index_2_entr_no / 512;
 	
-
 	long cursor_in_cluster = cursor % ClusterSize;
 
 	
 	long i = 0;
 	unsigned long index_2[512] = { 0 };
 	if (!std::memcmp(index_1, index_2, 512 * sizeof(unsigned long))) {
-		KernelFile::my_fs->readClusterFromPart(index_1_no, (char*)index_1);
+		my_fs->readClusterFromPart(index_1_no, (char*)index_1);
 	}
 	char temp_buffer[ClusterSize] = { 0 };
 	int ret = 1;
 	int k = 0;
 
-	while (i < to_read_in_file) {
-		//ovde treba jedna velika optimizacija
-		//da se ovo izbaci van while-a i da se updajetuje index2 samo kad treba ne svaki put
-
-		ret = KernelFile::my_fs->readClusterFromPart(index_1[entry_1], (char*)index_2);
+	if (last_index2_no == 0 || dirty_index2) {
+		ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
 		if (ret == 0) {
-			
+
+			std::cout << "ERROR READING INDEX2 CLUSTER  NO: " << index_1[index_1_entry] << std::endl;
 			return CLUSTER_READING_ERR;
 		}
-		ret = KernelFile::my_fs->readClusterFromPart(index_2[entry_2], temp_buffer);
+		last_index2_no = index_1[index_1_entry];
+		std::memcpy(last_index2, index_2, 512 * sizeof(unsigned long));
+		dirty_index2 = false;
+
+	}
+	else if (last_index2_no != index_1[index_1_entry]) {
+		ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)last_index2);
+		if (ret == 0) {
+
+			std::cout << "ERROR READING INDEX2 CLUSTER  NO: " << index_1[index_1_entry] << std::endl;
+			return CLUSTER_READING_ERR;
+		}
+		last_index2_no = index_1[index_1_entry];
+		std::memcpy(index_2, last_index2, 512 * sizeof(unsigned long));
+	}
+	else {
+		std::memcpy((char*)index_2, (char*)last_index2, ClusterSize * sizeof(char));
+	}
+
+	while (i < to_read_in_file) {
+		
+		ret = readCluster(index_2[index_2_entry], temp_buffer);
 		if (ret == 0) {
 			
 			return CLUSTER_READING_ERR;
 		}
 		
 		long to_read_in_cluster = (ClusterSize - cursor_in_cluster > to_read_in_file - i ? to_read_in_file - i : ClusterSize - cursor_in_cluster);
-		
+
 		for (long j = cursor_in_cluster; j < cursor_in_cluster + to_read_in_cluster; j++) {
 			buffer[i++] = temp_buffer[j];
-			if (i == 78930) {
-				i = 78930;
-			}
 
-			//std::cout << buffer[i];
 		}
-		
-		
 		
 		if (i < to_read_in_file) {
 			cursor_in_cluster = 0;
-			entry_2++;
-			if (entry_2 == 512) {
-				entry_1++;
-				entry_2 = 0;
+			index_2_entry++;
+			if (index_2_entry == 512) {
+				index_1_entry++;
+				index_2_entry = 0;
+				if (index_1[index_1_entry]) {
+					ret = my_fs->readClusterFromPart(index_1[index_1_entry], (char*)index_2);
+					std::memcpy(last_index2, index_2, 512 * sizeof(unsigned long));
+					last_index2_no = index_1[index_1_entry];
+					if (ret == 0) {
+						return CLUSTER_READING_ERR;
+					}
+				}
+				else {
+					dirty_index2 = true;
+				}
+				
 			}
 		}
 	}
 	cursor += to_read_in_file;
+	if (cursor%ClusterSize == 0) {
+		index_2_entry++;
+		if (index_2_entry == 512) {
+			index_2_entry = 0;
+			index_1_entry++;
+			dirty_index2 = true;
+		}
+	}
 	
-
 	return to_read_in_file;
  }
 
@@ -399,7 +506,6 @@ char KernelFile::seek(BytesCnt new_cursor)
 
 BytesCnt KernelFile::filePos()
 {
-
 	return cursor;
 }
 
